@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import platform
 from face_recognition_module import FaceRecognitionSystem
 from db_operations import DatabaseManager
 
@@ -20,9 +21,25 @@ if 'face_system' not in st.session_state:
 if 'db_manager' not in st.session_state:
     st.session_state.db_manager = DatabaseManager()
 
+def check_camera_availability():
+    """Check if camera is available and return appropriate camera index"""
+    # Try different camera indices
+    for index in range(3):  # Try indices 0, 1, 2
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            cap.release()
+            if ret:
+                return index
+    return None
+
 # Main app
 def main():
     st.title("Real-time Face Recognition System")
+    
+    # Check camera availability
+    if 'camera_index' not in st.session_state:
+        st.session_state.camera_index = check_camera_availability()
     
     # Sidebar
     st.sidebar.title("Navigation")
@@ -45,6 +62,31 @@ def home_page():
     
     col1, col2 = st.columns(2)
     
+    # Show camera status
+    if st.session_state.camera_index is None:
+        st.error("No webcam detected. Please connect a webcam and restart the application.")
+        st.info("If you're using a virtual machine or WSL, make sure the webcam is properly shared with the environment.")
+        
+        # Troubleshooting info
+        with st.expander("Troubleshooting Tips"):
+            st.write("""
+            ### Troubleshooting webcam issues:
+            
+            1. **Windows**: Check Device Manager to ensure your webcam is working properly.
+            2. **Linux**: Try running `ls -l /dev/video*` in terminal to see available cameras.
+            3. **macOS**: Check System Preferences > Security & Privacy > Camera permissions.
+            4. **Docker/VM**: Ensure webcam is properly shared with the container/VM.
+            
+            If using WSL2, add these to your .wslconfig file:
+            ```
+            [wsl2]
+            kernelCommandLine = "usbcore.usbfs_memory_mb=1024"
+            ```
+            
+            Then restart WSL with `wsl --shutdown` and reopen.
+            """)
+        return
+    
     with col1:
         if st.button("Start Webcam" if not st.session_state.webcam_running else "Stop Webcam"):
             st.session_state.webcam_running = not st.session_state.webcam_running
@@ -55,32 +97,43 @@ def home_page():
     # Display webcam feed with face recognition
     if st.session_state.webcam_running:
         stframe = st.empty()
-        cap = cv2.VideoCapture(0)
         
-        while st.session_state.webcam_running:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to capture frame from webcam")
+        try:
+            cap = cv2.VideoCapture(st.session_state.camera_index)
+            if not cap.isOpened():
+                st.error(f"Failed to open webcam at index {st.session_state.camera_index}")
                 st.session_state.webcam_running = False
-                break
+                return
             
-            # Process frame for face recognition
-            face_locations, face_names, recognized_ids = st.session_state.face_system.recognize_faces(frame)
-            
-            # Draw face rectangles and names
-            for (top, right, bottom, left), name in zip(face_locations, face_names):
-                # Draw rectangle around face
-                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            while st.session_state.webcam_running:
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("Failed to capture frame from webcam")
+                    st.session_state.webcam_running = False
+                    break
                 
-                # Draw label
-                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED)
-                cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
-            
-            # Display the frame
-            stframe.image(frame, channels="BGR", use_column_width=True)
+                # Process frame for face recognition
+                face_locations, face_names, recognized_ids = st.session_state.face_system.recognize_faces(frame)
+                
+                # Draw face rectangles and names
+                for (top, right, bottom, left), name in zip(face_locations, face_names):
+                    # Draw rectangle around face
+                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                    
+                    # Draw label
+                    cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED)
+                    cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+                
+                # Display the frame
+                stframe.image(frame, channels="BGR", use_column_width=True)
         
-        # Release webcam when stopped
-        cap.release()
+        except Exception as e:
+            st.error(f"Error accessing webcam: {str(e)}")
+            st.info("If you're running in a virtual environment or container, make sure the webcam is properly shared.")
+        finally:
+            # Release webcam when stopped
+            if 'cap' in locals() and cap.isOpened():
+                cap.release()
 
 def register_page():
     st.header("Register New Face")
@@ -99,24 +152,32 @@ def register_page():
     
     # Handle webcam capture
     if upload_method == "Capture from Webcam":
-        st.write("Click the button below to capture your face from webcam")
-        if st.button("Capture Face"):
-            with st.spinner("Opening webcam..."):
-                cap = cv2.VideoCapture(0)
-                if not cap.isOpened():
-                    st.error("Could not open webcam")
-                else:
-                    # Capture frame
-                    ret, frame = cap.read()
-                    if ret:
-                        st.image(frame, channels="BGR", caption="Captured Image")
-                        # Save the captured frame temporarily
-                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-                        cv2.imwrite(temp_file.name, frame)
-                        uploaded_file = temp_file.name
-                    else:
-                        st.error("Failed to capture image")
-                    cap.release()
+        if st.session_state.camera_index is None:
+            st.error("No webcam detected. Please use the 'Upload Image' option instead.")
+        else:
+            st.write("Click the button below to capture your face from webcam")
+            if st.button("Capture Face"):
+                with st.spinner("Opening webcam..."):
+                    try:
+                        cap = cv2.VideoCapture(st.session_state.camera_index)
+                        if not cap.isOpened():
+                            st.error(f"Could not open webcam at index {st.session_state.camera_index}")
+                        else:
+                            # Capture frame
+                            ret, frame = cap.read()
+                            if ret:
+                                st.image(frame, channels="BGR", caption="Captured Image")
+                                # Save the captured frame temporarily
+                                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+                                cv2.imwrite(temp_file.name, frame)
+                                uploaded_file = temp_file.name
+                            else:
+                                st.error("Failed to capture image")
+                    except Exception as e:
+                        st.error(f"Error capturing image: {str(e)}")
+                    finally:
+                        if 'cap' in locals() and cap.isOpened():
+                            cap.release()
     
     # Process registration
     if submit_button and name and uploaded_file:
@@ -128,6 +189,10 @@ def register_page():
                 else:  # From file upload
                     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
                     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                
+                if image is None:
+                    st.error("Failed to read image. Please try again.")
+                    return
                 
                 # Register the face
                 success, message = st.session_state.face_system.register_new_face(name, image)
